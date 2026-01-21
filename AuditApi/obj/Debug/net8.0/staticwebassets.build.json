@@ -1,0 +1,11 @@
+{
+  "Version": 1,
+  "Hash": "z8bxx2aF0U0sBkDxuLAiy41IgoC5P485SHj9zVTVZiM=",
+  "Source": "AuditApi",
+  "BasePath": "_content/AuditApi",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [],
+  "Assets": []
+}
