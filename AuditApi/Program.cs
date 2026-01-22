@@ -1,5 +1,6 @@
 using AuditApi.Data;
 using AuditApi.models;
+using AuditApi.Services;
 /*
 using AuditApi.Services;
 */
@@ -17,20 +18,26 @@ var mongoCfg = builder.Configuration.GetSection("MongoDb");
 builder.Services.Configure<MongoDbSettings>(mongoCfg);
 var settings = mongoCfg.Get<MongoDbSettings>();
 
-/*
+
 var rabbitCfg = builder.Configuration.GetSection("RabbitMQ");
 builder.Services.Configure<RabbitMQSettings>(rabbitCfg);
-*/
+
 
 BsonSerializer.RegisterSerializer(new GuidSerializer(GuidRepresentation.Standard));
 
-builder.Services.AddSingleton<IMongoClient>(sp => new MongoClient(settings.ConnectionString));
+// Configure MongoDB client with retry settings
+var mongoClientSettings = MongoClientSettings.FromConnectionString(settings.ConnectionString);
+mongoClientSettings.ServerSelectionTimeout = TimeSpan.FromSeconds(30);
+mongoClientSettings.ConnectTimeout = TimeSpan.FromSeconds(30);
+mongoClientSettings.SocketTimeout = TimeSpan.FromSeconds(30);
+
+builder.Services.AddSingleton<IMongoClient>(sp => new MongoClient(mongoClientSettings));
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoClient>().GetDatabase(settings.DatabaseName));
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IMongoDatabase>().GetCollection<Activity>("Activities"));
 builder.Services.AddSingleton<IActivityRepository, ActivityRepository>();
-/*
-builder.Services.AddHostedService<RabbitMQConsumer>();
-*/
+
+builder.Services.AddHostedService<RabbitMqConsumer>();
+
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.

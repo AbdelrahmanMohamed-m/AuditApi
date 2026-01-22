@@ -1,4 +1,3 @@
-/*
 using System.Text;
 using System.Text.Json;
 using AuditApi.Data;
@@ -10,23 +9,20 @@ using RabbitMQ.Client.Events;
 
 namespace AuditApi.Services;
 
-public class RabbitMQConsumer : BackgroundService
+public class RabbitMqConsumer(
+    IOptions<RabbitMQSettings> settings,
+    IServiceProvider serviceProvider,
+    ILogger<RabbitMqConsumer> logger)
+    : BackgroundService
 {
-    private readonly RabbitMQSettings _settings;
-    private readonly IActivityRepository _repository;
-    private readonly ILogger<RabbitMQConsumer> _logger;
+    private readonly RabbitMQSettings _settings = settings.Value;
     private IConnection? _connection;
-    private IModel? _channel;
+    private IChannel? _channel;
 
-    public RabbitMQConsumer(IOptions<RabbitMQSettings> settings, IActivityRepository repository, ILogger<RabbitMQConsumer> logger)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _settings = settings.Value;
-        _repository = repository;
-        _logger = logger;
-    }
+        await Task.Delay(5000, stoppingToken); // Give RabbitMQ time to start
 
-    protected override Task ExecuteAsync(CancellationToken stoppingToken)
-    {
         try
         {
             var factory = new ConnectionFactory
@@ -37,17 +33,25 @@ public class RabbitMQConsumer : BackgroundService
                 Password = _settings.Password
             };
 
-            _connection = factory.CreateConnection();
-            _channel = _connection.CreateModel();
+            _connection = await factory.CreateConnectionAsync(stoppingToken);
+            _channel = await _connection.CreateChannelAsync(cancellationToken: stoppingToken);
 
-            _channel.QueueDeclare(queue: _settings.QueueName,
-                                  durable: false,
-                                  exclusive: false,
-                                  autoDelete: false,
-                                  arguments: null);
+            await _channel.QueueDeclareAsync(
+                queue: _settings.QueueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: stoppingToken);
 
-            var consumer = new EventingBasicConsumer(_channel);
-            consumer.Received += async (model, ea) =>
+            await _channel.BasicQosAsync(
+                prefetchSize: 0, 
+                prefetchCount: 1, 
+                global: false,
+                cancellationToken: stoppingToken);
+
+            var consumer = new AsyncEventingBasicConsumer(_channel);
+            consumer.ReceivedAsync += async (model, ea) =>
             {
                 var body = ea.Body.ToArray();
                 var message = Encoding.UTF8.GetString(body);
@@ -57,39 +61,68 @@ public class RabbitMQConsumer : BackgroundService
                     var dto = JsonSerializer.Deserialize<ActivityDto>(message);
                     if (dto != null)
                     {
+                        using var scope = serviceProvider.CreateScope();
+                        var repository = scope.ServiceProvider.GetRequiredService<IActivityRepository>();
+                        
                         var activity = ActvityMapper.ToModel(dto);
                         activity.Timestamp = DateTime.UtcNow;
-                        await _repository.AddActivity(activity);
-                        _logger.LogInformation("Processed activity from RabbitMQ: {TaskId}", activity.TaskId);
+                        await repository.AddActivity(activity);
+                        
+                        logger.LogInformation("Processed activity from RabbitMQ: {TaskId}", activity.TaskId);
                     }
+
+                    await _channel.BasicAckAsync(ea.DeliveryTag, false);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error processing message from RabbitMQ");
+                    logger.LogError(ex, "Error processing message from RabbitMQ");
+                    await _channel.BasicNackAsync(ea.DeliveryTag, false, true);
                 }
-
-                _channel?.BasicAck(ea.DeliveryTag, false);
             };
 
-            _channel.BasicConsume(queue: _settings.QueueName,
-                                  autoAck: false,
-                                  consumer: consumer);
+            await _channel.BasicConsumeAsync(
+                queue: _settings.QueueName,
+                autoAck: false,
+                consumer: consumer,
+                cancellationToken: stoppingToken);
 
-            _logger.LogInformation("RabbitMQ consumer started");
+            logger.LogInformation("RabbitMQ consumer started and listening on queue: {QueueName}", _settings.QueueName);
+
+            // Keep running until cancellation
+            await Task.Delay(Timeout.Infinite, stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogInformation("RabbitMQ consumer is shutting down");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to start RabbitMQ consumer. RabbitMQ may not be available.");
+            logger.LogError(ex, "Failed to start RabbitMQ consumer");
+            throw;
         }
-
-        return Task.CompletedTask;
     }
 
-    public override void Dispose()
+    public override async void Dispose()
     {
-        _channel?.Close();
-        _connection?.Close();
+        try
+        {
+            if (_channel != null)
+            {
+                await _channel.CloseAsync();
+                _channel.Dispose();
+            }
+            
+            if (_connection != null)
+            {
+                await _connection.CloseAsync();
+                _connection.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error disposing RabbitMQ consumer");
+        }
+        
         base.Dispose();
     }
 }
-*/
